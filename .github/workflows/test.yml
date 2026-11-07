@@ -142,14 +142,14 @@ jobs:
         with:
           tool: cargo-nextest
 
-      # adapter-gui's build.rs writes the .mo catalogs into translations/,
+      # rig-gui's build.rs writes the .mo catalogs into translations/,
       # which slint-build watches. On a fresh checkout that write lands after
       # the build script started, so the next cargo call re-runs it and
-      # recompiles adapter-gui. Compiled here first, the .mo files are already
+      # recompiles rig-gui. Compiled here first, the .mo files are already
       # fresh and build.rs never writes them.
       - name: Compile the translation catalogs
         run: |
-          for po in crates/adapter-gui/translations/*/LC_MESSAGES/adapter-gui.po; do
+          for po in crates/rig-gui/translations/*/LC_MESSAGES/rig-gui.po; do
             msgfmt -o "${po%.po}.mo" "$po"
           done
 

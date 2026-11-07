@@ -23,58 +23,14 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # --------------------------------------------------------------------------
-  # Plugin bundle (#1093): the open-source LV2/VST3 tree lives in this repo at
-  # plugins/source (Git LFS). This job pulls it once, validates every package
-  # (manifest schema + declared files, LV2/VST3 only — NAM/IR stay in the
-  # private OpenRig-plugins repo and never ship), and uploads it as an
-  # artifact each platform job embeds in its installer. Pulling it once here
-  # keeps the platform jobs from each downloading ~600 MB of LFS.
-  # --------------------------------------------------------------------------
-  bundle-plugins:
-    name: Bundle plugins
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: xgodev/jovee
-          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
-          ref: ${{ inputs.tag }}
-
-      # The studio and its private git dependencies: load their deploy keys
-      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
-      - name: Load the deploy keys
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
-
-      - name: Pull the plugin tree from LFS
-        run: git lfs pull --include="plugins/source/**"
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: bundle-plugins
-
-      - name: Validate plugins
-        run: "cargo test -p plugin-loader --test integration bundled_catalog_valid::"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: openrig-plugins-tree
-          path: plugins/source
-          if-no-files-found: error
-          retention-days: 7
+  # The installers ship without the plugin tree: every platform job removes
+  # plugins/source before packaging, and the packaging scripts then bundle none.
 
   # --------------------------------------------------------------------------
   # macOS universal binary + .app bundle + .dmg
   # --------------------------------------------------------------------------
   build-macos:
     name: Build macOS (universal)
-    needs: bundle-plugins
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -84,8 +40,8 @@ jobs:
           ref: ${{ inputs.tag }}
 
       # nam crate's build.rs unpacks deps/NeuralAmpModelerCore.tar.gz (LFS,
-      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped
-      # here: it arrives from bundle-plugins (#1093).
+      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped:
+      # the installers ship without it.
       # The studio and its private git dependencies: load their deploy keys
       # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
       - name: Load the deploy keys
@@ -96,11 +52,8 @@ jobs:
       - name: Pull LFS objects except the plugin tree
         run: git lfs pull --exclude="plugins/source/**"
 
-      - name: Download plugin tree
-        uses: actions/download-artifact@v4
-        with:
-          name: openrig-plugins-tree
-          path: plugins/source
+      - name: Leave the plugin tree out of the installer
+        run: rm -rf plugins/source
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -155,7 +108,6 @@ jobs:
     # gradually (#816). Re-enable: drop this `if`, add the job back to
     # create-release `needs`, and uncomment its download step below.
     if: false
-    needs: bundle-plugins
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -165,8 +117,8 @@ jobs:
           ref: ${{ inputs.tag }}
 
       # nam crate's build.rs unpacks deps/NeuralAmpModelerCore.tar.gz (LFS,
-      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped
-      # here: it arrives from bundle-plugins (#1093).
+      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped:
+      # the installers ship without it.
       # The studio and its private git dependencies: load their deploy keys
       # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
       - name: Load the deploy keys
@@ -177,11 +129,8 @@ jobs:
       - name: Pull LFS objects except the plugin tree
         run: git lfs pull --exclude="plugins/source/**"
 
-      - name: Download plugin tree
-        uses: actions/download-artifact@v4
-        with:
-          name: openrig-plugins-tree
-          path: plugins/source
+      - name: Leave the plugin tree out of the installer
+        run: rm -rf plugins/source
 
       - name: Install system dependencies
         run: |
@@ -249,7 +198,6 @@ jobs:
     name: Build Linux aarch64
     # Temporarily disabled — macOS only for now (#816). See build-linux-x86_64.
     if: false
-    needs: bundle-plugins
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
@@ -259,8 +207,8 @@ jobs:
           ref: ${{ inputs.tag }}
 
       # nam crate's build.rs unpacks deps/NeuralAmpModelerCore.tar.gz (LFS,
-      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped
-      # here: it arrives from bundle-plugins (#1093).
+      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped:
+      # the installers ship without it.
       # The studio and its private git dependencies: load their deploy keys
       # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
       - name: Load the deploy keys
@@ -271,11 +219,8 @@ jobs:
       - name: Pull LFS objects except the plugin tree
         run: git lfs pull --exclude="plugins/source/**"
 
-      - name: Download plugin tree
-        uses: actions/download-artifact@v4
-        with:
-          name: openrig-plugins-tree
-          path: plugins/source
+      - name: Leave the plugin tree out of the installer
+        run: rm -rf plugins/source
 
       - name: Install system dependencies
         run: |
@@ -343,7 +288,6 @@ jobs:
     name: Build Windows x64
     # Temporarily disabled — macOS only for now (#816). See build-linux-x86_64.
     if: false
-    needs: bundle-plugins
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -353,8 +297,8 @@ jobs:
           ref: ${{ inputs.tag }}
 
       # nam crate's build.rs unpacks deps/NeuralAmpModelerCore.tar.gz (LFS,
-      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped
-      # here: it arrives from bundle-plugins (#1093).
+      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped:
+      # the installers ship without it.
       # The studio and its private git dependencies: load their deploy keys
       # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
       - name: Load the deploy keys
@@ -365,11 +309,8 @@ jobs:
       - name: Pull LFS objects except the plugin tree
         run: git lfs pull --exclude="plugins/source/**"
 
-      - name: Download plugin tree
-        uses: actions/download-artifact@v4
-        with:
-          name: openrig-plugins-tree
-          path: plugins/source
+      - name: Leave the plugin tree out of the installer
+        run: rm -rf plugins/source
 
       - name: Cache Cargo
         uses: actions/cache@v4

@@ -49,7 +49,11 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull the plugin tree from LFS
-        run: git lfs pull --include="plugins/source/**"
+        # checkout leaves this repo's token as a github.com auth header, which
+        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
+        run: |
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          git lfs pull --include="plugins/source/**"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -94,7 +98,11 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        run: git lfs pull --exclude="plugins/source/**"
+        # checkout leaves this repo's token as a github.com auth header, which
+        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
+        run: |
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          git lfs pull --exclude="plugins/source/**"
 
       - name: Download plugin tree
         uses: actions/download-artifact@v4
@@ -175,7 +183,11 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        run: git lfs pull --exclude="plugins/source/**"
+        # checkout leaves this repo's token as a github.com auth header, which
+        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
+        run: |
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          git lfs pull --exclude="plugins/source/**"
 
       - name: Download plugin tree
         uses: actions/download-artifact@v4
@@ -269,7 +281,11 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        run: git lfs pull --exclude="plugins/source/**"
+        # checkout leaves this repo's token as a github.com auth header, which
+        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
+        run: |
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          git lfs pull --exclude="plugins/source/**"
 
       - name: Download plugin tree
         uses: actions/download-artifact@v4
@@ -363,7 +379,11 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        run: git lfs pull --exclude="plugins/source/**"
+        # checkout leaves this repo's token as a github.com auth header, which
+        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
+        run: |
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          git lfs pull --exclude="plugins/source/**"
 
       - name: Download plugin tree
         uses: actions/download-artifact@v4

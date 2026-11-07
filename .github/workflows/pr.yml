@@ -53,7 +53,11 @@ jobs:
       # #1093: every LFS object except the ~600 MB plugin tree, which no test
       # here reads (#974's NeuralAmpModelerCore archive included).
       - name: Pull LFS objects except the plugin tree
-        run: git lfs pull --exclude="plugins/source/**"
+        # checkout leaves this repo's token as a github.com auth header, which
+        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
+        run: |
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          git lfs pull --exclude="plugins/source/**"
 
       # The studio and its private git dependencies: their deploy keys go
       # into an agent whose socket the gate container mounts below.

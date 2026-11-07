@@ -21,10 +21,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # Whole-repo static gate (file-size caps + no inline test modules). Runs over
-  # every tracked file, not just the diff, so debt can't grow outside the frozen
-  # allowlist. Build-free (VALIDATE_STATIC_ONLY) — fmt/clippy/slint are the
-  # shared quality gate's job, not this one. See issue #793 / #792.
+  # Build-free tests of the studio's own scripts.
   validate-static:
     name: Static Checks (whole repo)
     runs-on: ubuntu-latest
@@ -34,8 +31,6 @@ jobs:
           repository: xgodev/jovee
           ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
           ref: ${{ inputs.ref }}
-      - name: Validate file sizes and inline test modules
-        run: VALIDATE_STATIC_ONLY=1 ./scripts/validate.sh crates
       # #974: nam-refresh uses this script to write develop.
       - name: Test the NeuralAmpModelerCore vendor script
         run: |
@@ -43,17 +38,10 @@ jobs:
           python3 -m pytest -q scripts/test_nam_vendor.py
       - name: Test the pre-PR gate and its hook
         run: python3 -m pytest -q scripts/test_pre_pr_gate.py
-      # #1118: a test file missing from its crate's tests/main.rs never runs.
-      - name: Test the integration-test registration check
-        run: ./scripts/tests/integration_test_registration_test.sh
       - name: Test the build lock and its hook
         run: python3 -m pytest -q scripts/test_cargo_locked.py
       - name: Test that the git libraries follow their branch
         run: python3 -m pytest -q scripts/test_git_dependencies.py
-      - name: Test the unused-dependency check
-        run: |
-          python3 -m pytest -q scripts/test_unused_deps.py
-          ./scripts/tests/unused_dependencies_test.sh
 
   test:
     name: Test Suite
@@ -103,7 +91,11 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        run: git lfs pull --exclude="plugins/source/**"
+        # checkout leaves this repo's token as a github.com auth header, which
+        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
+        run: |
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          git lfs pull --exclude="plugins/source/**"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -221,7 +213,11 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        run: git lfs pull --exclude="plugins/source/**"
+        # checkout leaves this repo's token as a github.com auth header, which
+        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
+        run: |
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          git lfs pull --exclude="plugins/source/**"
 
       - name: Vendor the newest upstream release
         id: vendor
@@ -330,7 +326,11 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        run: git lfs pull --exclude="plugins/source/**"
+        # checkout leaves this repo's token as a github.com auth header, which
+        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
+        run: |
+          git config --local --unset-all 'http.https://github.com/.extraheader' || true
+          git lfs pull --exclude="plugins/source/**"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

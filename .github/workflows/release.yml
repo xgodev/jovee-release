@@ -461,6 +461,22 @@ jobs:
         with:
           name: jovee-macos
           path: artifacts
+
+      # The app's updater runs releases/latest/download/install-macos.sh; the
+      # source repo is private, so the script ships as an asset of the release.
+      - name: Check out the tag's installer script
+        uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.tag }}
+          path: source
+          sparse-checkout: scripts/install-macos.sh
+          sparse-checkout-cone-mode: false
+          lfs: false
+
+      - name: Add the installer script to the assets
+        run: cp source/scripts/install-macos.sh artifacts/install-macos.sh
       # Linux/Windows downloads disabled — macOS only for now (#816).
       # Re-enable alongside the matching build job.
       # - name: Download Linux x86_64 artifact

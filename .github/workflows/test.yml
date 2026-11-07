@@ -19,6 +19,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GIT_TRACE: 1
 
 jobs:
   # Build-free tests of the studio's own scripts.

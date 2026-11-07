@@ -49,11 +49,10 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull the plugin tree from LFS
-        # checkout leaves this repo's token as a github.com auth header, which
-        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
-        run: |
-          git config --local --unset-all 'http.https://github.com/.extraheader' || true
-          git lfs pull --include="plugins/source/**"
+        # Without the agent: ssh would offer a dependency's deploy key first, and
+        # GitHub answers "Repository not found" for xgodev/jovee. checkout's own
+        # key (core.sshCommand) is the one that reaches it.
+        run: SSH_AUTH_SOCK= git lfs pull --include="plugins/source/**"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -98,11 +97,10 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        # checkout leaves this repo's token as a github.com auth header, which
-        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
-        run: |
-          git config --local --unset-all 'http.https://github.com/.extraheader' || true
-          git lfs pull --exclude="plugins/source/**"
+        # Without the agent: ssh would offer a dependency's deploy key first, and
+        # GitHub answers "Repository not found" for xgodev/jovee. checkout's own
+        # key (core.sshCommand) is the one that reaches it.
+        run: SSH_AUTH_SOCK= git lfs pull --exclude="plugins/source/**"
 
       - name: Download plugin tree
         uses: actions/download-artifact@v4
@@ -183,11 +181,10 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        # checkout leaves this repo's token as a github.com auth header, which
-        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
-        run: |
-          git config --local --unset-all 'http.https://github.com/.extraheader' || true
-          git lfs pull --exclude="plugins/source/**"
+        # Without the agent: ssh would offer a dependency's deploy key first, and
+        # GitHub answers "Repository not found" for xgodev/jovee. checkout's own
+        # key (core.sshCommand) is the one that reaches it.
+        run: SSH_AUTH_SOCK= git lfs pull --exclude="plugins/source/**"
 
       - name: Download plugin tree
         uses: actions/download-artifact@v4
@@ -281,11 +278,10 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        # checkout leaves this repo's token as a github.com auth header, which
-        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
-        run: |
-          git config --local --unset-all 'http.https://github.com/.extraheader' || true
-          git lfs pull --exclude="plugins/source/**"
+        # Without the agent: ssh would offer a dependency's deploy key first, and
+        # GitHub answers "Repository not found" for xgodev/jovee. checkout's own
+        # key (core.sshCommand) is the one that reaches it.
+        run: SSH_AUTH_SOCK= git lfs pull --exclude="plugins/source/**"
 
       - name: Download plugin tree
         uses: actions/download-artifact@v4
@@ -379,11 +375,10 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        # checkout leaves this repo's token as a github.com auth header, which
-        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
-        run: |
-          git config --local --unset-all 'http.https://github.com/.extraheader' || true
-          git lfs pull --exclude="plugins/source/**"
+        # Without the agent: ssh would offer a dependency's deploy key first, and
+        # GitHub answers "Repository not found" for xgodev/jovee. checkout's own
+        # key (core.sshCommand) is the one that reaches it.
+        run: SSH_AUTH_SOCK= git lfs pull --exclude="plugins/source/**"
 
       - name: Download plugin tree
         uses: actions/download-artifact@v4

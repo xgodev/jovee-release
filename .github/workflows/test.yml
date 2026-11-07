@@ -19,7 +19,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  GIT_TRACE: 1
 
 jobs:
   # Build-free tests of the studio's own scripts.
@@ -92,11 +91,10 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        # checkout leaves this repo's token as a github.com auth header, which
-        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
-        run: |
-          git config --local --unset-all 'http.https://github.com/.extraheader' || true
-          git lfs pull --exclude="plugins/source/**"
+        # Without the agent: ssh would offer a dependency's deploy key first, and
+        # GitHub answers "Repository not found" for xgodev/jovee. checkout's own
+        # key (core.sshCommand) is the one that reaches it.
+        run: SSH_AUTH_SOCK= git lfs pull --exclude="plugins/source/**"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -214,11 +212,10 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        # checkout leaves this repo's token as a github.com auth header, which
-        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
-        run: |
-          git config --local --unset-all 'http.https://github.com/.extraheader' || true
-          git lfs pull --exclude="plugins/source/**"
+        # Without the agent: ssh would offer a dependency's deploy key first, and
+        # GitHub answers "Repository not found" for xgodev/jovee. checkout's own
+        # key (core.sshCommand) is the one that reaches it.
+        run: SSH_AUTH_SOCK= git lfs pull --exclude="plugins/source/**"
 
       - name: Vendor the newest upstream release
         id: vendor
@@ -327,11 +324,10 @@ jobs:
           ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
 
       - name: Pull LFS objects except the plugin tree
-        # checkout leaves this repo's token as a github.com auth header, which
-        # LFS would send to xgodev/jovee; drop it so LFS authenticates over SSH.
-        run: |
-          git config --local --unset-all 'http.https://github.com/.extraheader' || true
-          git lfs pull --exclude="plugins/source/**"
+        # Without the agent: ssh would offer a dependency's deploy key first, and
+        # GitHub answers "Repository not found" for xgodev/jovee. checkout's own
+        # key (core.sshCommand) is the one that reaches it.
+        run: SSH_AUTH_SOCK= git lfs pull --exclude="plugins/source/**"
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable

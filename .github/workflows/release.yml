@@ -1,0 +1,560 @@
+name: Release
+
+# Builds a tag of xgodev/jovee and publishes it as a release of this
+# repo. Started by the studio's scripts/release-publish.sh once the tag is
+# pushed there; it passes the release notes, built from the studio milestone.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Studio tag to build and publish (e.g. v0.9.0)'
+        required: true
+      notes:
+        description: 'Release notes (markdown)'
+        required: false
+        default: ''
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # #1060: baked into release binaries; empty = crash reporting off.
+  SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Plugin bundle (#1093): the open-source LV2/VST3 tree lives in this repo at
+  # plugins/source (Git LFS). This job pulls it once, validates every package
+  # (manifest schema + declared files, LV2/VST3 only — NAM/IR stay in the
+  # private OpenRig-plugins repo and never ship), and uploads it as an
+  # artifact each platform job embeds in its installer. Pulling it once here
+  # keeps the platform jobs from each downloading ~600 MB of LFS.
+  # --------------------------------------------------------------------------
+  bundle-plugins:
+    name: Bundle plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.tag }}
+
+      # The studio and its private git dependencies: load their deploy keys
+      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
+
+      - name: Pull the plugin tree from LFS
+        run: git lfs pull --include="plugins/source/**"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-plugins
+
+      - name: Validate plugins
+        run: "cargo test -p plugin-loader --test integration bundled_catalog_valid::"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openrig-plugins-tree
+          path: plugins/source
+          if-no-files-found: error
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # macOS universal binary + .app bundle + .dmg
+  # --------------------------------------------------------------------------
+  build-macos:
+    name: Build macOS (universal)
+    needs: bundle-plugins
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.tag }}
+
+      # nam crate's build.rs unpacks deps/NeuralAmpModelerCore.tar.gz (LFS,
+      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped
+      # here: it arrives from bundle-plugins (#1093).
+      # The studio and its private git dependencies: load their deploy keys
+      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
+
+      - name: Pull LFS objects except the plugin tree
+        run: git lfs pull --exclude="plugins/source/**"
+
+      - name: Download plugin tree
+        uses: actions/download-artifact@v4
+        with:
+          name: openrig-plugins-tree
+          path: plugins/source
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-cargo-
+
+      - name: Bump workspace version from the tag
+        # The tag is the source of truth for the released version (#820). The
+        # launcher footer renders env!("CARGO_PKG_VERSION"), so the workspace
+        # manifest has to carry the tag's version before anything is compiled —
+        # otherwise the binary ships a stale version under a fresh artifact name.
+        # create-release commits the same bump back to develop.
+        if: inputs.tag != ''
+        shell: bash
+        run: |
+          source scripts/lib/release-version.sh
+          VERSION="$(release_version_from_tag "$RELEASE_TAG")"
+          set_workspace_version Cargo.toml "$VERSION"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            V="${RELEASE_TAG#v}"
+          else
+            V="${{ inputs.version }}"
+            V="${V:-dev}"
+          fi
+          echo "v=${V}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package
+        env:
+          VERSION: ${{ steps.ver.outputs.v }}
+        run: ./scripts/package-macos.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jovee-macos
+          path: dist/JoVee-*-macos-universal.dmg
+
+  # --------------------------------------------------------------------------
+  # Linux x86_64: .tar.gz + .deb + .rpm + .AppImage
+  # --------------------------------------------------------------------------
+  build-linux-x86_64:
+    name: Build Linux x86_64
+    # Temporarily disabled — shipping macOS only while platforms roll out
+    # gradually (#816). Re-enable: drop this `if`, add the job back to
+    # create-release `needs`, and uncomment its download step below.
+    if: false
+    needs: bundle-plugins
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.tag }}
+
+      # nam crate's build.rs unpacks deps/NeuralAmpModelerCore.tar.gz (LFS,
+      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped
+      # here: it arrives from bundle-plugins (#1093).
+      # The studio and its private git dependencies: load their deploy keys
+      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
+
+      - name: Pull LFS objects except the plugin tree
+        run: git lfs pull --exclude="plugins/source/**"
+
+      - name: Download plugin tree
+        uses: actions/download-artifact@v4
+        with:
+          name: openrig-plugins-tree
+          path: plugins/source
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev libdbus-1-dev pkg-config clang libclang-dev \
+            libfontconfig1-dev libseat-dev \
+            libxkbcommon-dev libinput-dev libgbm-dev \
+            libjack-jackd2-dev \
+            fakeroot rpm ruby-dev build-essential cmake \
+            librsvg2-bin imagemagick \
+            gettext patchelf squashfs-tools
+
+      - name: Install fpm
+        run: sudo gem install fpm --no-document
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-x86_64-u24-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: linux-x86_64-u24-cargo-
+
+      - name: Bump workspace version from the tag
+        # See build-macos for why this has to precede the build (#820).
+        if: inputs.tag != ''
+        shell: bash
+        run: |
+          source scripts/lib/release-version.sh
+          VERSION="$(release_version_from_tag "$RELEASE_TAG")"
+          set_workspace_version Cargo.toml "$VERSION"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            V="${RELEASE_TAG#v}"
+          else
+            V="${{ inputs.version }}"
+            V="${V:-0.0.0-dev}"
+          fi
+          echo "v=${V}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package
+        env:
+          VERSION: ${{ steps.ver.outputs.v }}
+        run: ./scripts/package-linux.sh --arch x86_64 --version "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jovee-linux-x86_64
+          path: |
+            dist/jovee-*-linux-x86_64.tar.gz
+            dist/jovee_*_amd64.deb
+            dist/jovee-*-1.x86_64.rpm
+            dist/JoVee-*-linux-x86_64.AppImage
+
+  # --------------------------------------------------------------------------
+  # Linux aarch64: .tar.gz + .deb + .rpm + .AppImage
+  # --------------------------------------------------------------------------
+  build-linux-aarch64:
+    name: Build Linux aarch64
+    # Temporarily disabled — macOS only for now (#816). See build-linux-x86_64.
+    if: false
+    needs: bundle-plugins
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.tag }}
+
+      # nam crate's build.rs unpacks deps/NeuralAmpModelerCore.tar.gz (LFS,
+      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped
+      # here: it arrives from bundle-plugins (#1093).
+      # The studio and its private git dependencies: load their deploy keys
+      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
+
+      - name: Pull LFS objects except the plugin tree
+        run: git lfs pull --exclude="plugins/source/**"
+
+      - name: Download plugin tree
+        uses: actions/download-artifact@v4
+        with:
+          name: openrig-plugins-tree
+          path: plugins/source
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev libudev-dev libdbus-1-dev pkg-config clang libclang-dev \
+            libfontconfig1-dev libseat-dev \
+            libxkbcommon-dev libinput-dev libgbm-dev \
+            libjack-jackd2-dev \
+            fakeroot rpm ruby-dev build-essential cmake \
+            librsvg2-bin imagemagick \
+            gettext patchelf squashfs-tools
+
+      - name: Install fpm
+        run: sudo gem install fpm --no-document
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-aarch64-u24-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: linux-aarch64-u24-cargo-
+
+      - name: Bump workspace version from the tag
+        # See build-macos for why this has to precede the build (#820).
+        if: inputs.tag != ''
+        shell: bash
+        run: |
+          source scripts/lib/release-version.sh
+          VERSION="$(release_version_from_tag "$RELEASE_TAG")"
+          set_workspace_version Cargo.toml "$VERSION"
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            V="${RELEASE_TAG#v}"
+          else
+            V="${{ inputs.version }}"
+            V="${V:-0.0.0-dev}"
+          fi
+          echo "v=${V}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package
+        env:
+          VERSION: ${{ steps.ver.outputs.v }}
+        run: ./scripts/package-linux.sh --arch aarch64 --version "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jovee-linux-aarch64
+          path: |
+            dist/jovee-*-linux-aarch64.tar.gz
+            dist/jovee_*_arm64.deb
+            dist/jovee-*-1.aarch64.rpm
+            dist/JoVee-*-linux-aarch64.AppImage
+
+  # --------------------------------------------------------------------------
+  # Windows x64: .zip (full bundle) + .msi (installer)
+  # --------------------------------------------------------------------------
+  build-windows:
+    name: Build Windows x64
+    # Temporarily disabled — macOS only for now (#816). See build-linux-x86_64.
+    if: false
+    needs: bundle-plugins
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.tag }}
+
+      # nam crate's build.rs unpacks deps/NeuralAmpModelerCore.tar.gz (LFS,
+      # #974) and cmake-builds cpp/ against it. The plugin tree is skipped
+      # here: it arrives from bundle-plugins (#1093).
+      # The studio and its private git dependencies: load their deploy keys
+      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
+
+      - name: Pull LFS objects except the plugin tree
+        run: git lfs pull --exclude="plugins/source/**"
+
+      - name: Download plugin tree
+        uses: actions/download-artifact@v4
+        with:
+          name: openrig-plugins-tree
+          path: plugins/source
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-x64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-x64-cargo-
+
+      - name: Bump workspace version from the tag
+        # See build-macos for why this has to precede the build (#820).
+        if: inputs.tag != ''
+        shell: bash
+        run: |
+          source scripts/lib/release-version.sh
+          VERSION="$(release_version_from_tag "$RELEASE_TAG")"
+          set_workspace_version Cargo.toml "$VERSION"
+
+      - name: Download ASIO SDK
+        shell: pwsh
+        run: |
+          $sdk_url = "https://download.steinberg.net/sdk_downloads/asiosdk_2.3.3_2019-06-14.zip"
+          Invoke-WebRequest -Uri $sdk_url -OutFile asiosdk.zip
+          Expand-Archive -Path asiosdk.zip -DestinationPath C:\asiosdk
+          $sdk_dir = (Get-ChildItem C:\asiosdk -Directory)[0].FullName
+          "CPAL_ASIO_DIR=$sdk_dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "ASIO SDK: $sdk_dir"
+
+      - name: Install LLVM/clang (required by ASIO bindgen)
+        run: choco install llvm -y --no-progress
+
+      - name: Build
+        # Build the GUI plus the headless console + offline-render binaries
+        # (issue #741). Keep this package list in sync with
+        # scripts/lib/console-binaries.tsv, which package-windows.ps1 reads to
+        # stage them. macOS/Linux derive the same flags via console_build_flags.
+        run: cargo build --release -p adapter-gui -p adapter-console -p adapter-console-rig -p adapter-render
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            V="${RELEASE_TAG#v}"
+          else
+            V="${{ inputs.version }}"
+            V="${V:-0.0.0-dev}"
+          fi
+          echo "v=${V}" >> "$GITHUB_OUTPUT"
+
+      - name: Install WiX Toolset v3
+        run: choco install wixtoolset -y --no-progress
+
+      - name: Install MinGW runtime DLLs (needed by the MinGW-built nam_wrapper DLL)
+        shell: cmd
+        run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-x86_64-gcc-libs mingw-w64-x86_64-winpthreads-git
+
+      - name: Package (.zip + .msi)
+        env:
+          VERSION: ${{ steps.ver.outputs.v }}
+        shell: pwsh
+        run: .\scripts\package-windows.ps1 "$env:VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jovee-windows-x64
+          path: |
+            dist/JoVee-*-windows-x64.zip
+            dist/JoVee-*-windows-x64.msi
+
+  # --------------------------------------------------------------------------
+  # GitHub Release (only on tag push)
+  # --------------------------------------------------------------------------
+  create-release:
+    name: Create GitHub Release
+    # macOS only for now (#816); add the platform jobs back here as they
+    # are re-enabled.
+    needs: [build-macos]
+    runs-on: ubuntu-latest
+    if: inputs.tag != ''
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jovee-macos
+          path: artifacts
+      # Linux/Windows downloads disabled — macOS only for now (#816).
+      # Re-enable alongside the matching build job.
+      # - name: Download Linux x86_64 artifact
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: jovee-linux-x86_64
+      #     path: artifacts
+      # - name: Download Linux aarch64 artifact
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: jovee-linux-aarch64
+      #     path: artifacts
+      # - name: Download Windows artifact
+      #   uses: actions/download-artifact@v4
+      #   with:
+      #     name: jovee-windows-x64
+      #     path: artifacts
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          mapfile -t FILES < <(find artifacts -type f | sort)
+          # A pre-release tag (v*-beta.N on the release branch) publishes as a
+          # GitHub PRE-RELEASE; the final vX.Y.Z on main is a full release.
+          case "$TAG" in
+            *-*) PRERELEASE=--prerelease ;;
+            *)   PRERELEASE= ;;
+          esac
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --title "JoVee $TAG" \
+            $PRERELEASE \
+            --notes "${NOTES:-JoVee $TAG}" \
+            "${FILES[@]}"
+
+  # --------------------------------------------------------------------------
+  # Commit the version bump to develop (issue #820)
+  #
+  # The build jobs patch Cargo.toml inside their runner so the binary reports
+  # the tag's version, but that edit dies with the runner. Without this job the
+  # repository keeps the previous version and the next release starts from a
+  # stale manifest again. `develop` is the always-ahead reference branch and the
+  # source of truth for the manifest, so the bump is pushed there; `main` (the
+  # production branch, tagged for the final release) never falls behind because
+  # every release flows release/vX.Y.Z -> main -> develop.
+  #
+  # Final release ONLY: a pre-release (v*-beta.N on the release branch) must not
+  # bump develop to a beta version, so the job is skipped for tags with a `-`.
+  # --------------------------------------------------------------------------
+  commit-version-bump:
+    name: Commit version bump to develop
+    needs: create-release
+    runs-on: ubuntu-latest
+    if: inputs.tag != '' && !contains(inputs.tag, '-')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: develop
+
+      # The studio and its private git dependencies: load their deploy keys
+      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
+
+      - name: Bump workspace version and refresh the lockfile
+        run: |
+          source scripts/lib/release-version.sh
+          VERSION="$(release_version_from_tag "$RELEASE_TAG")"
+          set_workspace_version Cargo.toml "$VERSION"
+          # -w rewrites only the workspace members' own entries; dependency
+          # resolutions stay pinned exactly as the release was built.
+          cargo update --workspace --quiet
+
+      - name: Commit and push
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if git diff --quiet -- Cargo.toml Cargo.lock; then
+            echo "develop is already at ${TAG#v} — nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore: bump workspace version to ${TAG#v}"
+          git pull --rebase origin develop
+          git push origin develop

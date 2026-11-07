@@ -1,0 +1,462 @@
+name: Build Plugin Libraries
+
+# Started by hand with the studio ref, recipe and platform
+# (`gh workflow run build-libs.yml -R xgodev/jovee-release -f ref=<branch> -f recipe=<r>`).
+# Commit-libs commits the rebuilt binaries back to that branch of
+# xgodev/jovee.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'xgodev/jovee branch to build from and commit the libraries to'
+        required: true
+        default: 'develop'
+      recipe:
+        description: 'Recipe(s) to build: one upstream group or a comma-separated list (e.g. nam, "valentine,ninestrip", "all"). Not a catalogue folder.'
+        required: true
+        default: 'all'
+      platform:
+        description: 'Platform to build for'
+        type: choice
+        required: true
+        default: 'all'
+        options:
+          - all
+          - linux-x86_64
+          - linux-aarch64
+          - macos-universal
+          - windows-x86_64
+          - windows-aarch64
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      recipes: ${{ steps.detect.outputs.recipes }}
+      platform: ${{ steps.detect.outputs.platform }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+          submodules: false
+
+      - name: Resolve recipe + platform
+        id: detect
+        run: |
+          set -euo pipefail
+          KNOWN_PLATFORMS="linux-x86_64 linux-aarch64 macos-universal windows-x86_64 windows-aarch64"
+
+          RECIPE="${{ inputs.recipe }}"
+          PLATFORM="${{ inputs.platform }}"
+          echo "recipe=$RECIPE platform=$PLATFORM"
+
+          # Validate the platform value so a typo fails the run loudly instead of silently skipping
+          # every platform job.
+          if [ "$PLATFORM" != "all" ]; then
+            case " $KNOWN_PLATFORMS " in
+              *" $PLATFORM "*) ;;
+              *) echo "ERROR: unknown platform '$PLATFORM'" >&2; exit 1 ;;
+            esac
+          fi
+
+          # A comma-separated recipe list ("valentine,ninestrip") becomes one
+          # matrix entry per recipe in a single run, so commit-libs pushes once
+          # instead of N parallel runs racing on the same branch.
+          RECIPES_JSON=$(echo "$RECIPE" | tr -d ' ' | jq -R -c 'split(",") | map(select(length > 0))')
+          echo "recipes=$RECIPES_JSON" >> "$GITHUB_OUTPUT"
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+  linux-x86_64:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true' && (needs.detect-changes.outputs.platform == 'all' || needs.detect-changes.outputs.platform == 'linux-x86_64')
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: ${{ fromJson(needs.detect-changes.outputs.recipes) }}
+    steps:
+      - run: git config --global url."https://".insteadOf git://
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake meson ninja-build pkg-config \
+            autoconf automake libtool \
+            lv2-dev libsndfile1-dev libsamplerate0-dev libfftw3-dev \
+            libzita-convolver-dev libglu1-mesa-dev libcairo2-dev \
+            libx11-dev liblo-dev libjack-jackd2-dev libfluidsynth-dev \
+            libxcb-util-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-xkb-dev \
+            libx11-xcb-dev libxcb-icccm4-dev libxcb-dri2-0-dev libxcursor-dev libxkbcommon-dev libgl-dev libasound2-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxext-dev libfontconfig1-dev \
+            libfreetype-dev libgtk-3-dev libgtkmm-3.0-dev libsqlite3-dev
+
+      - name: Build ${{ matrix.recipe }}
+        run: |
+          OUTPUT_DIR="$GITHUB_WORKSPACE/output" \
+          DEPS_DIR="$GITHUB_WORKSPACE/deps" \
+          BUILD_WORK_DIR="/tmp/openrig-build" \
+            bash scripts/build-lib-internal.sh ${{ matrix.recipe }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-${{ matrix.recipe }}
+          path: output/
+
+  linux-aarch64:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true' && (needs.detect-changes.outputs.platform == 'all' || needs.detect-changes.outputs.platform == 'linux-aarch64')
+    runs-on: ubuntu-22.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: ${{ fromJson(needs.detect-changes.outputs.recipes) }}
+    steps:
+      - run: git config --global url."https://".insteadOf git://
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake meson ninja-build pkg-config \
+            autoconf automake libtool \
+            lv2-dev libsndfile1-dev libsamplerate0-dev libfftw3-dev \
+            libzita-convolver-dev libglu1-mesa-dev libcairo2-dev \
+            libx11-dev liblo-dev libjack-jackd2-dev libfluidsynth-dev \
+            libxcb-util-dev libxcb-cursor-dev libxcb-keysyms1-dev libxcb-xkb-dev \
+            libx11-xcb-dev libxcb-icccm4-dev libxcb-dri2-0-dev libxcursor-dev libxkbcommon-dev libgl-dev libasound2-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxext-dev libfontconfig1-dev \
+            libfreetype-dev libgtk-3-dev libgtkmm-3.0-dev libsqlite3-dev
+
+      - name: Build ${{ matrix.recipe }}
+        run: |
+          OUTPUT_DIR="$GITHUB_WORKSPACE/output" \
+          DEPS_DIR="$GITHUB_WORKSPACE/deps" \
+          BUILD_WORK_DIR="/tmp/openrig-build" \
+            bash scripts/build-lib-internal.sh ${{ matrix.recipe }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-aarch64-${{ matrix.recipe }}
+          path: output/
+
+  macos-universal:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true' && (needs.detect-changes.outputs.platform == 'all' || needs.detect-changes.outputs.platform == 'macos-universal')
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: ${{ fromJson(needs.detect-changes.outputs.recipes) }}
+    steps:
+      - run: git config --global url."https://".insteadOf git://
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew install cmake meson ninja pkg-config autoconf automake libtool \
+            lv2 libsndfile libsamplerate fftw cairo jack fluidsynth
+
+      - name: Build ${{ matrix.recipe }}
+        run: |
+          OUTPUT_DIR="$GITHUB_WORKSPACE/output" \
+          DEPS_DIR="$GITHUB_WORKSPACE/deps" \
+          BUILD_WORK_DIR="/tmp/openrig-build" \
+          CMAKE_EXTRA="-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" \
+            bash scripts/build-lib-internal.sh ${{ matrix.recipe }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal-${{ matrix.recipe }}
+          path: output/
+
+  windows-x86_64:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true' && (needs.detect-changes.outputs.platform == 'all' || needs.detect-changes.outputs.platform == 'windows-x86_64')
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: ${{ fromJson(needs.detect-changes.outputs.recipes) }}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - shell: bash
+        run: git config --global url."https://".insteadOf git://
+
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-lv2
+            mingw-w64-x86_64-libsndfile
+            mingw-w64-x86_64-libsamplerate
+            mingw-w64-x86_64-fftw
+            mingw-w64-x86_64-cairo
+            make autoconf automake libtool git
+
+      - name: Build ${{ matrix.recipe }}
+        env:
+          RECIPE: ${{ matrix.recipe }}
+        run: |
+          export OUTPUT_DIR="$(pwd)/output"
+          export DEPS_DIR="$(pwd)/deps"
+          export BUILD_WORK_DIR="/tmp/openrig-build"
+          # MSYS2/MINGW64 builds natively (no cross prefix); MINGW_TARGET
+          # tells lib_ext() to emit .dll.
+          export MINGW_TARGET=1
+          mkdir -p "$OUTPUT_DIR"
+          bash scripts/build-lib-internal.sh "$RECIPE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-${{ matrix.recipe }}
+          path: output/
+
+  windows-aarch64:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true' && (needs.detect-changes.outputs.platform == 'all' || needs.detect-changes.outputs.platform == 'windows-aarch64')
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        recipe: ${{ fromJson(needs.detect-changes.outputs.recipes) }}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - shell: bash
+        run: git config --global url."https://".insteadOf git://
+
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-aarch64-gcc
+            mingw-w64-clang-aarch64-cmake
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-meson
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-pkg-config
+            make autoconf automake libtool git
+
+      - name: Build ${{ matrix.recipe }}
+        run: |
+          export OUTPUT_DIR="$(pwd)/output"
+          export DEPS_DIR="$(pwd)/deps"
+          export BUILD_WORK_DIR="/tmp/openrig-build"
+          export CROSS_COMPILE="aarch64-w64-mingw32"
+          export CC="aarch64-w64-mingw32-gcc"
+          export CXX="aarch64-w64-mingw32-g++"
+          export CMAKE_EXTRA="-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=ARM64 -DCMAKE_C_COMPILER=aarch64-w64-mingw32-gcc -DCMAKE_CXX_COMPILER=aarch64-w64-mingw32-g++"
+          mkdir -p "$OUTPUT_DIR"
+          bash scripts/build-lib-internal.sh ${{ matrix.recipe }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-aarch64-${{ matrix.recipe }}
+          path: output/
+
+  # Place each .so/.dylib/.dll under plugins/source/lv2/<plugin>/platform/<plat>/
+  # and update the matching plugin's manifest.yaml. A binary is matched to a
+  # plugin by basename without extension across ANY platform already declared
+  # in the manifest — so a freshly-built Windows .dll lands next to its Linux
+  # / macOS siblings even before the manifest declares binaries.windows-x86_64.
+  # The manifest is then updated in place so subsequent runs can dispatch via
+  # the direct lookup.
+  #
+  # A single binary can be claimed by multiple catalogue entries — openAV
+  # ArtyFX ships artyfx.so but the LV2 bundle exposes bitta / driva / filta
+  # / roomy / satma as separate plugin URIs, each living in its own folder
+  # under plugins/source/lv2/. The dispatcher fan-outs the binary to every
+  # matching folder rather than stopping at the first hit.
+  commit-libs:
+    needs: [detect-changes, linux-x86_64, linux-aarch64, macos-universal, windows-x86_64, windows-aarch64]
+    if: always() && needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # The binaries are Git LFS objects (.gitattributes): the filter and the
+      # pre-push hook must be active before `git add` / `git push`.
+      - name: Setup Git LFS
+        run: git lfs install
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Dispatch binaries into plugins/source/lv2/<plugin>/platform/<plat>/
+        run: |
+          set -euo pipefail
+          # Artifact directory names are "<platform>-<recipe>". Recipe names
+          # can contain dashes (dragonfly-reverb), so the platform is matched
+          # against the known set rather than parsed by splitting.
+          placed=0
+          manifest_writes=0
+          for art in artifacts/*/; do
+            [ -d "$art" ] || continue
+            base=$(basename "$art")
+            platform=""
+            for plat in linux-x86_64 linux-aarch64 macos-universal windows-x86_64 windows-aarch64; do
+              case "$base" in
+                ${plat}-*) platform="$plat"; break ;;
+              esac
+            done
+            [ -n "$platform" ] || { echo "skip: $base (unknown platform)"; continue; }
+
+            for bin in "$art"*; do
+              [ -f "$bin" ] || continue
+              bname=$(basename "$bin")
+              stem="${bname%.*}"
+
+              # Collect every manifest whose declared binaries (on ANY
+              # platform) share this basename without extension. A brand-new
+              # Windows .dll resolves to whichever plugin folders have the
+              # same stem on an existing platform — and one binary can be
+              # claimed by N folders (LV2 bundles like artyfx.so).
+              matched_dirs=()
+              for manifest in plugins/source/lv2/*/manifest.yaml; do
+                while IFS= read -r expected; do
+                  [ -n "$expected" ] && [ "$expected" != "null" ] || continue
+                  expected_stem="$(basename "$expected")"
+                  expected_stem="${expected_stem%.*}"
+                  if [ "$expected_stem" = "$stem" ]; then
+                    matched_dirs+=("$(dirname "$manifest")")
+                    break
+                  fi
+                done < <(yq -r '.binaries // {} | .[]' "$manifest")
+              done
+
+              if [ ${#matched_dirs[@]} -eq 0 ]; then
+                echo "skip: $bname ($platform) — no manifest claims this basename"
+                continue
+              fi
+
+              for matched in "${matched_dirs[@]}"; do
+                mkdir -p "$matched/platform/$platform"
+                cp "$bin" "$matched/platform/$platform/$bname"
+                echo "place: $matched/platform/$platform/$bname"
+                placed=$((placed+1))
+
+                rel="platform/$platform/$bname"
+                current=$(yq -r ".binaries.\"$platform\" // \"\"" "$matched/manifest.yaml")
+                if [ "$current" != "$rel" ]; then
+                  yq -i ".binaries.\"$platform\" = \"$rel\"" "$matched/manifest.yaml"
+                  echo "  manifest: set binaries.$platform = $rel"
+                  manifest_writes=$((manifest_writes+1))
+                fi
+              done
+            done
+          done
+          echo "Placed $placed binaries; updated $manifest_writes manifest entries"
+
+      # VST3 recipes emit a cross-platform bundle DIRECTORY (Contents/<arch>/…)
+      # rather than a single shared lib, and live under plugins/source/vst3/ with
+      # a `bundle:` field (not `binaries:`). Each platform runner populates only
+      # its own Contents/<arch>/ subfolder (plus the shared Info.plist/PkgInfo/
+      # moduleinfo.json on macOS); this step unions those trees into the shipped
+      # bundle, matching the output <Name>.vst3 to the plugin folder whose
+      # manifest `bundle:` ends in the same basename.
+      - name: Merge VST3 bundles into plugins/source/vst3/<plugin>/bundles/
+        run: |
+          set -euo pipefail
+          [ -d plugins/source/vst3 ] || { echo "no vst3 catalogue yet"; exit 0; }
+          merged=0
+          for art in artifacts/*/; do
+            [ -d "$art" ] || continue
+            base=$(basename "$art")
+            platform=""
+            for plat in linux-x86_64 linux-aarch64 macos-universal windows-x86_64 windows-aarch64; do
+              case "$base" in ${plat}-*) platform="$plat"; break ;; esac
+            done
+            [ -n "$platform" ] || continue
+            while IFS= read -r bundle; do
+              [ -d "$bundle" ] || continue
+              bname=$(basename "$bundle")
+              for manifest in plugins/source/vst3/*/manifest.yaml; do
+                [ -f "$manifest" ] || continue
+                decl=$(yq -r '.bundle // ""' "$manifest")
+                [ -n "$decl" ] && [ "$(basename "$decl")" = "$bname" ] || continue
+                dest="$(dirname "$manifest")/$decl"
+                mkdir -p "$dest"
+                cp -R "$bundle/." "$dest/"
+                echo "merge: $bundle -> $dest ($platform)"
+                merged=$((merged+1))
+              done
+            done < <(find "$art" -maxdepth 2 -type d -name "*.vst3")
+          done
+          echo "Merged $merged VST3 bundle tree(s)"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add plugins/source/lv2/ plugins/source/vst3/
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          RECIPES=$(echo '${{ needs.detect-changes.outputs.recipes }}' | tr -d '[]"' | tr ',' ' ')
+          git commit -m "ci: rebuild prebuilt libs for ${RECIPES}"
+          git push

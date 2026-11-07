@@ -1,0 +1,394 @@
+name: Test
+
+# Tests a ref of xgodev/jovee, started by hand
+# (`gh workflow run test.yml -R xgodev/jovee-release -f ref=<branch>`).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'xgodev/jovee branch, tag or commit to check'
+        required: true
+        default: 'develop'
+
+# One run per ref; cancel superseded runs.
+concurrency:
+  group: test-${{ inputs.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # Whole-repo static gate (file-size caps + no inline test modules). Runs over
+  # every tracked file, not just the diff, so debt can't grow outside the frozen
+  # allowlist. Build-free (VALIDATE_STATIC_ONLY) — fmt/clippy/slint are the
+  # shared quality gate's job, not this one. See issue #793 / #792.
+  validate-static:
+    name: Static Checks (whole repo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+      - name: Validate file sizes and inline test modules
+        run: VALIDATE_STATIC_ONLY=1 ./scripts/validate.sh crates
+      # #974: nam-refresh uses this script to write develop.
+      - name: Test the NeuralAmpModelerCore vendor script
+        run: |
+          python3 -m pip install --quiet pytest
+          python3 -m pytest -q scripts/test_nam_vendor.py
+      - name: Test the pre-PR gate and its hook
+        run: python3 -m pytest -q scripts/test_pre_pr_gate.py
+      # #1118: a test file missing from its crate's tests/main.rs never runs.
+      - name: Test the integration-test registration check
+        run: ./scripts/tests/integration_test_registration_test.sh
+      - name: Test the build lock and its hook
+        run: python3 -m pytest -q scripts/test_cargo_locked.py
+      - name: Test that the git libraries follow their branch
+        run: python3 -m pytest -q scripts/test_git_dependencies.py
+      - name: Test the unused-dependency check
+        run: |
+          python3 -m pytest -q scripts/test_unused_deps.py
+          ./scripts/tests/unused_dependencies_test.sh
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    # A warning fails the job like an error: Linux-only warnings (a helper
+    # left unused by a `cfg(not(all(target_os = "linux", feature = "jack")))`
+    # test) never show up on the owner's Mac. Job-level, so rust-cache keys on it.
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      # The debug test binaries of the whole workspace outgrow the runner's
+      # free disk: lld then dies with SIGBUS (signal 7) while writing the
+      # adapter-gui test binary. Drop the preinstalled toolchains this job
+      # never uses before building.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
+          df -h /
+
+      # The workspace build peaks above the runner's RAM while it compiles and
+      # links the adapter crates; the runner then loses the job (exit 137/143,
+      # "lost communication with the server"). A swap file on the freed disk
+      # absorbs the peak instead of killing the job.
+      - name: Add swap for the build peak
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 16G /ci-swapfile
+          sudo chmod 600 /ci-swapfile
+          sudo mkswap /ci-swapfile
+          sudo swapon /ci-swapfile
+          free -h
+
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+
+      # #1093: every LFS object except the ~600 MB plugin tree, which no test
+      # here reads (#974's NeuralAmpModelerCore archive included).
+      # The studio and its private git dependencies: load their deploy keys
+      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
+
+      - name: Pull LFS objects except the plugin tree
+        run: git lfs pull --exclude="plugins/source/**"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # #991: rust-cache keys on the members' manifests and Cargo.lock, not on
+      # the root manifest, whose profiles and workspace features rebuild every
+      # dependency when they change. Its RUST* env vars are part of the key.
+      # The release version line is left out: it changes on every release.
+      - name: Key the cache on the root manifest
+        run: echo "RUST_CACHE_ROOT_MANIFEST=$(grep -v '^version = ' Cargo.toml | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
+
+      # #991: with no cache every run compiled 516 third-party crates (557
+      # with the workspace) from scratch — ~12 of the job's ~20 minutes. Only
+      # branch pushes save, so a PR run restores its base branch's cache
+      # instead of adding its own to the repo's 10 GB quota. Workspace crates
+      # are never cached. A failed run still saves: its dependencies built.
+      - name: Cache cargo registry and dependency builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-debug
+          save-if: ${{ inputs.ref == 'develop' }}
+          cache-on-failure: true
+
+      - name: Install system dependencies
+        # A mirror that stops answering hangs apt silently; bound it.
+        timeout-minutes: 10
+        run: |
+          APT="sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o DPkg::Lock::Timeout=60"
+          $APT update
+          $APT install -y \
+            libasound2-dev libudev-dev libdbus-1-dev pkg-config clang libclang-dev \
+            libfontconfig1-dev libseat-dev \
+            libxkbcommon-dev libinput-dev libgbm-dev \
+            libjack-jackd2-dev gettext
+
+      # The suite must be able to fail the job — no `|| true`. Tests that need
+      # the owner's private capture tree (JOVEE_OWNER_PLUGINS) skip loudly
+      # when it is absent; they never hard-fail CI. See issue #793.
+      # A hard timeout keeps a hung test from wedging the runner for hours
+      # (see issue #693 FIFO tests, fixed to never block the test thread).
+      # nextest runs every test binary in parallel; it skips doctests, so
+      # `cargo test --doc` runs them after. scripts/pre-pr-gate.sh runs the same.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # adapter-gui's build.rs writes the .mo catalogs into translations/,
+      # which slint-build watches. On a fresh checkout that write lands after
+      # the build script started, so the next cargo call re-runs it and
+      # recompiles adapter-gui. Compiled here first, the .mo files are already
+      # fresh and build.rs never writes them.
+      - name: Compile the translation catalogs
+        run: |
+          for po in crates/adapter-gui/translations/*/LC_MESSAGES/adapter-gui.po; do
+            msgfmt -o "${po%.po}.mo" "$po"
+          done
+
+      # A failed run saves its cache, and a saved key is never overwritten. Cargo
+      # stops starting new crates at the first compile error, so a red workspace
+      # crate used to save a cache with most dependencies missing, and every run
+      # after it compiled them all again. --keep-going builds every crate the
+      # error does not block, so the saved cache always holds all dependencies.
+      # `cargo nextest run` builds what `cargo test` builds: tests, examples,
+      # bins, and the plain lib of every crate for its doctests. The build step
+      # builds them all, so the run step compiles nothing.
+      # Line tables instead of full debuginfo on the workspace crates keep those
+      # links small. Set per step, never job-wide: rust-cache keys on the
+      # job's CARGO_* env, and a new key restores no cache at all.
+      - name: Build tests
+        env:
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+        run: timeout --signal=SIGKILL 1500 cargo build --workspace --lib --tests --examples --bins --keep-going
+
+      - name: Run tests
+        env:
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+        run: |
+          timeout --signal=SIGKILL 1500 cargo nextest run --workspace --no-fail-fast
+          timeout --signal=SIGKILL 600 cargo test --workspace --doc
+
+      - name: Disk left after the build
+        if: always()
+        run: df -h /
+
+  # #974: after develop's own tests pass, move the vendored NeuralAmpModelerCore
+  # to the newest upstream release. The new version is tested here, in its own
+  # job, and pushed to develop only when the whole suite passes — a release
+  # that breaks the build or the tests never lands, and this job goes red
+  # naming it. Only develop: release branches take the new NAM when they are
+  # cut from it, and a bot push there would leave the release→main PR head
+  # with no checks (GITHUB_TOKEN pushes trigger no workflow). An unreachable
+  # upstream or a refused push is a warning.
+  nam-refresh:
+    name: Refresh vendored NeuralAmpModelerCore
+    needs: test
+    if: inputs.ref == 'develop'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+
+      # #1093: every LFS object except the ~600 MB plugin tree, which no test
+      # here reads (#974's NeuralAmpModelerCore archive included).
+      # The studio and its private git dependencies: load their deploy keys
+      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
+
+      - name: Pull LFS objects except the plugin tree
+        run: git lfs pull --exclude="plugins/source/**"
+
+      - name: Vendor the newest upstream release
+        id: vendor
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 scripts/nam_vendor.py update
+          if [ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]; then
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust stable
+        if: steps.vendor.outputs.bumped == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Key the cache on the root manifest
+        if: steps.vendor.outputs.bumped == 'true'
+        run: echo "RUST_CACHE_ROOT_MANIFEST=$(grep -v '^version = ' Cargo.toml | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
+
+      # #991: same debug build as the Test Suite, so it reads that job's cache.
+      - name: Restore the Test Suite's dependency cache
+        if: steps.vendor.outputs.bumped == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-debug
+          save-if: false
+
+      - name: Install system dependencies
+        if: steps.vendor.outputs.bumped == 'true'
+        # A mirror that stops answering hangs apt silently; bound it.
+        timeout-minutes: 10
+        run: |
+          APT="sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o DPkg::Lock::Timeout=60"
+          $APT update
+          $APT install -y \
+            libasound2-dev libudev-dev libdbus-1-dev pkg-config clang libclang-dev \
+            libfontconfig1-dev libseat-dev \
+            libxkbcommon-dev libinput-dev libgbm-dev \
+            libjack-jackd2-dev gettext
+
+      # #1118: each crate's integration tests share one binary; nextest keeps
+      # every test in its own process (process-global state stays per test).
+      - name: Install cargo-nextest
+        if: steps.vendor.outputs.bumped == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Test the new release
+        if: steps.vendor.outputs.bumped == 'true'
+        run: |
+          timeout --signal=SIGKILL 1500 cargo nextest run --workspace --no-fail-fast
+          timeout --signal=SIGKILL 600 cargo test --workspace --doc
+
+      - name: Push it to develop
+        if: steps.vendor.outputs.bumped == 'true'
+        run: python3 scripts/nam_vendor.py push
+
+  # Coverage is REPORTING, not a gate. It lives in its own job with
+  # continue-on-error so it can NEVER block a PR whose tests passed: the
+  # `cargo llvm-cov` instrumented rebuild + full re-run of this large
+  # audio/Slint workspace is heavy enough to exhaust an ubuntu runner (OOM /
+  # disk), and a killed runner ignores an inline `|| true`. Isolating it keeps
+  # the Test Suite result about tests only. See issue #793.
+  coverage:
+    name: Coverage (reporting)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    # Reporting only: never hold a runner longer than a full instrumented run.
+    timeout-minutes: 50
+    steps:
+      # The instrumented rebuild fills the runner's disk the same way the
+      # Test Suite build does; drop the same unused toolchains first.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
+          df -h /
+
+      # The workspace build peaks above the runner's RAM while it compiles and
+      # links the adapter crates; the runner then loses the job (exit 137/143,
+      # "lost communication with the server"). A swap file on the freed disk
+      # absorbs the peak instead of killing the job.
+      - name: Add swap for the build peak
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 16G /ci-swapfile
+          sudo chmod 600 /ci-swapfile
+          sudo mkswap /ci-swapfile
+          sudo swapon /ci-swapfile
+          free -h
+
+      - uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee
+          ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
+          ref: ${{ inputs.ref }}
+
+      # #1093: every LFS object except the ~600 MB plugin tree, which no test
+      # here reads (#974's NeuralAmpModelerCore archive included).
+      # The studio and its private git dependencies: load their deploy keys
+      # so git and cargo can fetch them (git CLI over SSH, CARGO_NET_GIT_FETCH_WITH_CLI).
+      - name: Load the deploy keys
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_KEYS }}
+
+      - name: Pull LFS objects except the plugin tree
+        run: git lfs pull --exclude="plugins/source/**"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Key the cache on the root manifest
+        run: echo "RUST_CACHE_ROOT_MANIFEST=$(grep -v '^version = ' Cargo.toml | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
+
+      # #991: the instrumented build has its own cache (separate
+      # target/llvm-cov-target); same save rules as the Test Suite. Saving on
+      # failure matters here: a cold run can hit the 30-min step limit after
+      # its dependencies are built, and without it the next run is cold again.
+      - name: Cache cargo registry and dependency builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage-instrumented
+          save-if: ${{ inputs.ref == 'develop' }}
+          cache-on-failure: true
+
+      - name: Install system dependencies
+        # A mirror that stops answering hangs apt silently; bound it.
+        timeout-minutes: 10
+        run: |
+          APT="sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o DPkg::Lock::Timeout=60"
+          $APT update
+          $APT install -y \
+            libasound2-dev libudev-dev libdbus-1-dev pkg-config clang libclang-dev \
+            libfontconfig1-dev libseat-dev \
+            libxkbcommon-dev libinput-dev libgbm-dev \
+            libjack-jackd2-dev gettext
+
+      # #991: prebuilt binary; `cargo install` compiled it from source (~1 min).
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # #1118: each crate's integration tests share one binary; nextest keeps
+      # every test in its own process, as the Test Suite runs them.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Generate coverage report
+        timeout-minutes: 30
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info || true
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lcov-coverage
+          path: lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        if: always()
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

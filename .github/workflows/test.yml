@@ -115,7 +115,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: test-debug
-          save-if: ${{ inputs.ref == 'develop' }}
+          # The key hashes the root manifest, so a release branch never hits
+          # develop's cache: it saves its own or every run stays cold.
+          save-if: ${{ inputs.ref == 'develop' || startsWith(inputs.ref, 'release/') }}
           cache-on-failure: true
 
       - name: Install system dependencies
@@ -343,7 +345,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: coverage-instrumented
-          save-if: ${{ inputs.ref == 'develop' }}
+          # The key hashes the root manifest, so a release branch never hits
+          # develop's cache: it saves its own or every run stays cold.
+          save-if: ${{ inputs.ref == 'develop' || startsWith(inputs.ref, 'release/') }}
           cache-on-failure: true
 
       - name: Install system dependencies

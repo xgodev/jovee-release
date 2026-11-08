@@ -69,7 +69,9 @@ jobs:
       - name: Add swap for the build peak
         run: |
           sudo swapoff -a
-          sudo fallocate -l 16G /ci-swapfile
+          # 4 GB: the build peaked at ~8.4 GB RAM and <1 GB swap, and every GB
+          # here is a GB the target dir cannot use ("No space left on device").
+          sudo fallocate -l 4G /ci-swapfile
           sudo chmod 600 /ci-swapfile
           sudo mkswap /ci-swapfile
           sudo swapon /ci-swapfile
@@ -163,27 +165,27 @@ jobs:
       # `cargo nextest run` builds what `cargo test` builds: tests, examples,
       # bins, and the plain lib of every crate for its doctests. The build step
       # builds them all, so the run step compiles nothing.
-      # Line tables instead of full debuginfo on the workspace crates keep those
-      # links small. Set per step, never job-wide: rust-cache keys on the
+      # No debuginfo: with line tables the target dir filled the ~96 GB left
+      # and the link failed with "No space left on device". Set per step, never job-wide: rust-cache keys on the
       # job's CARGO_* env, and a new key restores no cache at all.
       - name: Build tests
         # A runner that stops answering (the shell's own timeout never fires)
         # was only killed at the 6 h job limit; the runner-side limit ends it.
-        timeout-minutes: 45
+        timeout-minutes: 60
         env:
-          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+          CARGO_PROFILE_DEV_DEBUG: 0
           # With all 4 cores the warm build starved the runner until GitHub
           # lost it ("The hosted runner lost communication"); fewer parallel
           # rustc/linker processes keep it answering.
           CARGO_BUILD_JOBS: 2
-        # Memory and swap every minute, so a stalled build shows why.
+        # Memory, swap and disk every minute, so a stalled build shows why.
         run: |
-          (while sleep 60; do echo "mem: $(free -m | awk 'NR>1{printf "%s used=%s free=%s; ", $1, $3, $4}')"; done) &
-          timeout --signal=SIGKILL 2580 cargo build --workspace --lib --tests --examples --bins --keep-going
+          (while sleep 60; do echo "mem: $(free -m | awk 'NR>1{printf "%s used=%s free=%s; ", $1, $3, $4}') disk: $(df -h / | awk 'NR==2{print $4}') target: $(du -sh target 2>/dev/null | cut -f1)"; done) &
+          timeout --signal=SIGKILL 3480 cargo build --workspace --lib --tests --examples --bins --keep-going
 
       - name: Run tests
         env:
-          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+          CARGO_PROFILE_DEV_DEBUG: 0
         run: |
           timeout --signal=SIGKILL 1500 cargo nextest run --workspace --no-fail-fast
           timeout --signal=SIGKILL 600 cargo test --workspace --doc
@@ -314,7 +316,9 @@ jobs:
       - name: Add swap for the build peak
         run: |
           sudo swapoff -a
-          sudo fallocate -l 16G /ci-swapfile
+          # 4 GB: the build peaked at ~8.4 GB RAM and <1 GB swap, and every GB
+          # here is a GB the target dir cannot use ("No space left on device").
+          sudo fallocate -l 4G /ci-swapfile
           sudo chmod 600 /ci-swapfile
           sudo mkswap /ci-swapfile
           sudo swapon /ci-swapfile

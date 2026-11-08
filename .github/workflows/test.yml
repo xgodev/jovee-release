@@ -180,7 +180,16 @@ jobs:
           CARGO_BUILD_JOBS: 2
         # Memory, swap and disk every minute, so a stalled build shows why.
         run: |
-          (while sleep 60; do echo "mem: $(free -m | awk 'NR>1{printf "%s used=%s free=%s; ", $1, $3, $4}') disk: $(df -h / | awk 'NR==2{print $4}') target: $(du -sh target 2>/dev/null | cut -f1)"; done) &
+          # Below 10 GB free it prints what holds the disk and stops cargo, so
+          # the log survives (a full disk kills the runner and loses it).
+          (while sleep 30; do
+            echo "mem: $(free -m | awk 'NR>1{printf "%s used=%s free=%s; ", $1, $3, $4}') disk: $(df -h / | awk 'NR==2{print $4}') target: $(du -sh target 2>/dev/null | cut -f1)"
+            if [ "$(df --output=avail -BG / | tail -1 | tr -dc 0-9)" -lt 10 ]; then
+              du -xh --max-depth=3 target 2>/dev/null | sort -rh | head -30
+              sudo du -xh --max-depth=2 / 2>/dev/null | sort -rh | head -20
+              pkill -9 cargo; pkill -9 rustc; break
+            fi
+          done) &
           timeout --signal=SIGKILL 3480 cargo build --workspace --lib --tests --examples --bins --keep-going
 
       - name: Run tests

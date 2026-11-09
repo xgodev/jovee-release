@@ -2,7 +2,8 @@ name: Test
 
 # Tests a ref of xgodev/jovee, started by hand
 # (`gh workflow run test.yml -R xgodev/jovee-release -f ref=<branch> -f base=<commit>`;
-# add `-f coverage=true` for the coverage report).
+# add `-f coverage=true` for the coverage report). Only the tests that run the
+# changed lines run, from the map test-map.yml builds.
 on:
   workflow_dispatch:
     inputs:
@@ -11,7 +12,7 @@ on:
         required: true
         default: 'develop'
       base:
-        description: 'Commit before the changes under test: only the crates they touch, and the crates that depend on them, are tested. Empty = the last commit of ref.'
+        description: 'Commit before the changes under test: only the tests that run the lines they change run. Empty = the last commit of ref.'
         required: false
         default: ''
       coverage:
@@ -172,7 +173,25 @@ jobs:
             msgfmt -o "${po%.po}.mo" "$po"
           done
 
-      - name: Run the tests of the changed crates
+      # The test selector (tools/ci-test-map of this repository).
+      - name: Check out the test selector
+        uses: actions/checkout@v4
+        with:
+          repository: xgodev/jovee-release
+          path: .ci-tools
+
+      - name: Build the test selector
+        run: cargo build --release --manifest-path .ci-tools/tools/ci-test-map/Cargo.toml --target-dir .ci-tools/target
+
+      # The newest test map (test-map.yml): which tests run each function.
+      - name: Restore the test map
+        uses: actions/cache/restore@v4
+        with:
+          path: test-map.json
+          key: test-map-none
+          restore-keys: test-map-
+
+      - name: Run the tests of the changed lines
         timeout-minutes: 120
         env:
           # With all 4 cores the warm build starved the runner until GitHub
@@ -189,55 +208,30 @@ jobs:
               pkill -9 cargo; pkill -9 rustc; break
             fi
           done) &
-          # Only the changes under test: the crates whose files changed between
-          # base and ref, plus every workspace crate that depends on them.
-          # A change outside any crate that a build or test can read
-          # (Cargo.toml, Cargo.lock, .cargo, assets, plugins, proto...) tests
-          # every crate; docs, site, packaging and scripts test none.
+          # Only the tests that run a line changed between base and ref (from
+          # the test map), the new tests of the changed crates, and every test
+          # of a crate whose non-Rust file changed. A change outside any crate
+          # that a build can read (Cargo.lock, assets...) tests everything;
+          # docs, site, packaging and scripts test nothing. With no map: the
+          # changed crates and the crates that depend on them.
           base="${{ inputs.base }}"
           [ -n "$base" ] || base=HEAD~1
-          git diff --name-only "$base" HEAD > changed.txt
-          echo "changed files since $base: $(wc -l < changed.txt)"
+          sel=.ci-tools/target/release/ci-test-map
           cargo metadata --format-version 1 > metadata.json
-          python3 - <<'EOF' > affected.txt
-          import json, os
-          meta = json.load(open("metadata.json"))
-          root = meta["workspace_root"] + "/"
-          members = set(meta["workspace_members"])
-          dirs = {}
-          for p in meta["packages"]:
-              if p["id"] in members:
-                  dirs[os.path.dirname(p["manifest_path"])[len(root):] + "/"] = p["id"]
-          names = {p["id"]: p["name"] for p in meta["packages"]}
-          inert = ("docs/", "site/", ".github/", ".claude/", "packaging/", "dist/",
-                   "wix/", "docker/", "hardware/", "scripts/", "tools/")
-          touched, everything = set(), False
-          for f in open("changed.txt").read().split():
-              owner = max((d for d in dirs if f.startswith(d)), key=len, default=None)
-              if owner:
-                  touched.add(dirs[owner])
-              elif not (f.startswith(inert) or ("/" not in f and f.endswith(".md"))):
-                  everything = True
-          rdeps = {m: set() for m in members}
-          for node in meta["resolve"]["nodes"]:
-              for d in node["deps"]:
-                  if node["id"] in members and d["pkg"] in members:
-                      rdeps[d["pkg"]].add(node["id"])
-          todo = list(members if everything else touched)
-          seen = set(todo)
-          while todo:
-              for r in rdeps[todo.pop()] - seen:
-                  seen.add(r); todo.append(r)
-          print("\n".join(sorted(names[i] for i in seen)))
-          EOF
-          echo "crates to test: $(wc -l < affected.txt)"
+          $sel select --metadata metadata.json --base "$base" --map test-map.json --out selection
+          if [ -z "$(cat selection/packages)" ]; then echo "no test runs a changed line"; exit 0; fi
+          # Builds the test binaries of those crates and lists their tests.
+          cargo nextest list $(cat selection/packages) --message-format json > list.json
+          $sel select --metadata metadata.json --base "$base" --map test-map.json --list list.json --out selection
+          echo "filter: $(head -c 2000 selection/filter)"
           failed=""
-          pkgs=$(sed 's/^/-p /' affected.txt | tr '\n' ' ')
-          if [ -z "$pkgs" ]; then echo "no crate changed"; exit 0; fi
-          echo "testing: $pkgs"
-          # The e2e screen scenarios (e2e_ui) do not run in CI.
-          cargo nextest run $pkgs --no-fail-fast --no-tests=pass -E 'not test(/e2e_ui/)' || failed="$failed tests"
-          timeout --signal=SIGKILL 1200 cargo test $pkgs --doc || failed="$failed doctests"
+          # The e2e screen scenarios (e2e_ui) do not run in CI (the filter drops them).
+          if [ -n "$(cat selection/filter)" ]; then
+            cargo nextest run $(cat selection/packages) --no-fail-fast --no-tests=pass -E "$(cat selection/filter)" || failed="$failed tests"
+          fi
+          if [ -n "$(cat selection/doc-packages)" ]; then
+            timeout --signal=SIGKILL 1200 cargo test $(cat selection/doc-packages) --doc || failed="$failed doctests"
+          fi
           if [ -n "$failed" ]; then echo "::error::failed:$failed"; exit 1; fi
 
       - name: Disk left after the build

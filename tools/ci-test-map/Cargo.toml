@@ -1,0 +1,12 @@
+[package]
+name = "ci-test-map"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Built inside the jovee checkout in CI: its own workspace, not jovee's.
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

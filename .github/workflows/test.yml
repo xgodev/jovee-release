@@ -53,14 +53,8 @@ jobs:
         run: python3 -m pytest -q scripts/test_git_dependencies.py
 
   test:
-    name: Test Suite (${{ matrix.shard }}/4)
+    name: Test Suite
     runs-on: ubuntu-latest
-    # One runner ran every crate in turn for ~2 h. Four runners each take
-    # every fourth crate, on their own disk and cores.
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3]
     # A warning fails the job like an error: Linux-only warnings (a helper
     # left unused by a `cfg(not(all(target_os = "linux", feature = "jack")))`
     # test) never show up on the owner's Mac. Job-level, so rust-cache keys on it.
@@ -137,9 +131,7 @@ jobs:
       - name: Cache cargo registry and dependency builds
         uses: Swatinem/rust-cache@v2
         with:
-          # One cache per shard: each shard builds other crates, and a shared
-          # key kept only the first shard's build (the others compiled cold).
-          shared-key: test-debug-${{ matrix.shard }}
+          shared-key: test-debug
           # The key hashes the root manifest, so a release branch never hits
           # develop's cache: it saves its own or every run stays cold.
           save-if: ${{ inputs.ref == 'develop' || startsWith(inputs.ref, 'release/') }}
@@ -180,7 +172,7 @@ jobs:
             msgfmt -o "${po%.po}.mo" "$po"
           done
 
-      - name: Run this shard's tests
+      - name: Run the tests of the changed crates
         timeout-minutes: 120
         env:
           # With all 4 cores the warm build starved the runner until GitHub
@@ -197,10 +189,6 @@ jobs:
               pkill -9 cargo; pkill -9 rustc; break
             fi
           done) &
-          # One run for the whole shard: cargo builds its crates in parallel
-          # and nextest runs every test binary together. A quarter of the
-          # workspace's test binaries fits the runner disk (the whole
-          # workspace, 83 GB, did not).
           # Only the changes under test: the crates whose files changed between
           # base and ref, plus every workspace crate that depends on them.
           # A change outside any crate that a build or test can read
@@ -244,9 +232,9 @@ jobs:
           EOF
           echo "crates to test: $(wc -l < affected.txt)"
           failed=""
-          pkgs=$(awk -v s=${{ matrix.shard }} '(NR-1)%4==s' affected.txt | sed 's/^/-p /' | tr '\n' ' ')
-          if [ -z "$pkgs" ]; then echo "no crate for this shard"; exit 0; fi
-          echo "this shard: $pkgs"
+          pkgs=$(sed 's/^/-p /' affected.txt | tr '\n' ' ')
+          if [ -z "$pkgs" ]; then echo "no crate changed"; exit 0; fi
+          echo "testing: $pkgs"
           # The e2e screen scenarios (e2e_ui) do not run in CI.
           cargo nextest run $pkgs --no-fail-fast --no-tests=pass -E 'not test(/e2e_ui/)' || failed="$failed tests"
           timeout --signal=SIGKILL 1200 cargo test $pkgs --doc || failed="$failed doctests"

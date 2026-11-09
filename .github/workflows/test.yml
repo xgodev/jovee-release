@@ -1,7 +1,8 @@
 name: Test
 
 # Tests a ref of xgodev/jovee, started by hand
-# (`gh workflow run test.yml -R xgodev/jovee-release -f ref=<branch>`).
+# (`gh workflow run test.yml -R xgodev/jovee-release -f ref=<branch>`;
+# add `-f coverage=true` for the coverage report).
 on:
   workflow_dispatch:
     inputs:
@@ -9,6 +10,10 @@ on:
         description: 'xgodev/jovee branch, tag or commit to check'
         required: true
         default: 'develop'
+      coverage:
+        description: 'Also build the instrumented coverage report (rebuilds the whole workspace)'
+        type: boolean
+        default: false
 
 # One run per ref; cancel superseded runs.
 concurrency:
@@ -305,6 +310,9 @@ jobs:
   # the Test Suite result about tests only. See issue #793.
   coverage:
     name: Coverage (${{ matrix.shard }}/4)
+    # Only on request (-f coverage=true): the instrumented build recompiles
+    # the whole workspace with no cache, and the run ends only when it does.
+    if: inputs.coverage
     runs-on: ubuntu-latest
     continue-on-error: true
     # The instrumented test binaries of the whole workspace filled the runner's

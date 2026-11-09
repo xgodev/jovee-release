@@ -387,9 +387,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: coverage-instrumented-${{ matrix.shard }}
-          # The key hashes the root manifest, so a release branch never hits
-          # develop's cache: it saves its own or every run stays cold.
-          save-if: ${{ inputs.ref == 'develop' || startsWith(inputs.ref, 'release/') }}
+          # Never saved: GitHub keeps 10 GB of cache per repo and the four
+          # Test Suite caches take 2.5 GB each. Coverage caches evicted them,
+          # and the evicted shard compiled every dependency again.
+          save-if: false
           cache-on-failure: true
 
       - name: Install system dependencies

@@ -1,7 +1,7 @@
 name: Test
 
 # Tests a ref of xgodev/jovee, started by hand
-# (`gh workflow run test.yml -R xgodev/jovee-release -f ref=<branch>`;
+# (`gh workflow run test.yml -R xgodev/jovee-release -f ref=<branch> -f base=<commit>`;
 # add `-f coverage=true` for the coverage report).
 on:
   workflow_dispatch:
@@ -10,6 +10,10 @@ on:
         description: 'xgodev/jovee branch, tag or commit to check'
         required: true
         default: 'develop'
+      base:
+        description: 'Commit before the changes under test: only the crates they touch, and the crates that depend on them, are tested. Empty = the last commit of ref.'
+        required: false
+        default: ''
       coverage:
         description: 'Also build the instrumented coverage report (rebuilds the whole workspace)'
         type: boolean
@@ -97,6 +101,8 @@ jobs:
           repository: xgodev/jovee
           ssh-key: ${{ secrets.STUDIO_DEPLOY_KEY }}
           ref: ${{ inputs.ref }}
+          # The whole history: the changed files come from a diff against base.
+          fetch-depth: 0
 
       # #1093: every LFS object except the ~600 MB plugin tree, which no test
       # here reads (#974's NeuralAmpModelerCore archive included).
@@ -195,13 +201,55 @@ jobs:
           # and nextest runs every test binary together. A quarter of the
           # workspace's test binaries fits the runner disk (the whole
           # workspace, 83 GB, did not).
+          # Only the changes under test: the crates whose files changed between
+          # base and ref, plus every workspace crate that depends on them.
+          # A change outside any crate that a build or test can read
+          # (Cargo.toml, Cargo.lock, .cargo, assets, plugins, proto...) tests
+          # every crate; docs, site, packaging and scripts test none.
+          base="${{ inputs.base }}"
+          [ -n "$base" ] || base=HEAD~1
+          git diff --name-only "$base" HEAD > changed.txt
+          echo "changed files since $base: $(wc -l < changed.txt)"
+          cargo metadata --format-version 1 > metadata.json
+          python3 - <<'EOF' > affected.txt
+          import json, os
+          meta = json.load(open("metadata.json"))
+          root = meta["workspace_root"] + "/"
+          members = set(meta["workspace_members"])
+          dirs = {}
+          for p in meta["packages"]:
+              if p["id"] in members:
+                  dirs[os.path.dirname(p["manifest_path"])[len(root):] + "/"] = p["id"]
+          names = {p["id"]: p["name"] for p in meta["packages"]}
+          inert = ("docs/", "site/", ".github/", ".claude/", "packaging/", "dist/",
+                   "wix/", "docker/", "hardware/", "scripts/", "tools/")
+          touched, everything = set(), False
+          for f in open("changed.txt").read().split():
+              owner = max((d for d in dirs if f.startswith(d)), key=len, default=None)
+              if owner:
+                  touched.add(dirs[owner])
+              elif not (f.startswith(inert) or ("/" not in f and f.endswith(".md"))):
+                  everything = True
+          rdeps = {m: set() for m in members}
+          for node in meta["resolve"]["nodes"]:
+              for d in node["deps"]:
+                  if node["id"] in members and d["pkg"] in members:
+                      rdeps[d["pkg"]].add(node["id"])
+          todo = list(members if everything else touched)
+          seen = set(todo)
+          while todo:
+              for r in rdeps[todo.pop()] - seen:
+                  seen.add(r); todo.append(r)
+          print("\n".join(sorted(names[i] for i in seen)))
+          EOF
+          echo "crates to test: $(wc -l < affected.txt)"
           failed=""
-          pkgs=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort | awk -v s=${{ matrix.shard }} '(NR-1)%4==s' | sed 's/^/-p /' | tr '\n' ' ')
+          pkgs=$(awk -v s=${{ matrix.shard }} '(NR-1)%4==s' affected.txt | sed 's/^/-p /' | tr '\n' ' ')
+          if [ -z "$pkgs" ]; then echo "no crate for this shard"; exit 0; fi
+          echo "this shard: $pkgs"
           # The e2e screen scenarios (e2e_ui) do not run in CI.
           cargo nextest run $pkgs --no-fail-fast --no-tests=pass -E 'not test(/e2e_ui/)' || failed="$failed tests"
-          if [ "${{ matrix.shard }}" = 0 ]; then
-            timeout --signal=SIGKILL 1200 cargo test --workspace --doc || failed="$failed doctests"
-          fi
+          timeout --signal=SIGKILL 1200 cargo test $pkgs --doc || failed="$failed doctests"
           if [ -n "$failed" ]; then echo "::error::failed:$failed"; exit 1; fi
 
       - name: Disk left after the build

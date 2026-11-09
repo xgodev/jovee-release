@@ -435,7 +435,7 @@ jobs:
           pkgs=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort | awk -v s=${{ matrix.shard }} '(NR-1)%4==s' | sed 's/^/-p /' | tr '\n' ' ')
           # A failing test is the Test Suite's business: the report still
           # comes out. Anything else (build error, full disk) fails the step.
-          cargo llvm-cov nextest $pkgs --ignore-run-fail --no-fail-fast --no-tests=pass \
+          cargo llvm-cov nextest $pkgs --ignore-run-fail --no-tests=pass \
             -E 'not test(/e2e_ui/)' --lcov --output-path lcov.info
 
       - name: Upload coverage artifact

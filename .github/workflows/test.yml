@@ -126,7 +126,9 @@ jobs:
       - name: Cache cargo registry and dependency builds
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-debug
+          # One cache per shard: each shard builds other crates, and a shared
+          # key kept only the first shard's build (the others compiled cold).
+          shared-key: test-debug-${{ matrix.shard }}
           # The key hashes the root manifest, so a release branch never hits
           # develop's cache: it saves its own or every run stays cold.
           save-if: ${{ inputs.ref == 'develop' || startsWith(inputs.ref, 'release/') }}
@@ -196,7 +198,8 @@ jobs:
           failed=""
           for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | sort | awk -v s=${{ matrix.shard }} '(NR-1)%4==s'); do
             echo "::group::$pkg"
-            cargo nextest run -p "$pkg" --no-fail-fast --no-tests=pass || failed="$failed $pkg"
+            # The e2e screen scenarios (e2e_ui) do not run in CI.
+            cargo nextest run -p "$pkg" --no-fail-fast --no-tests=pass -E 'not test(/e2e_ui/)' || failed="$failed $pkg"
             echo "::endgroup::"
             find target/debug/deps -maxdepth 1 -type f -perm -u+x ! -name '*.so' -delete
           done
@@ -269,7 +272,7 @@ jobs:
         if: steps.vendor.outputs.bumped == 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: test-debug
+          shared-key: test-debug-0
           save-if: false
 
       - name: Install system dependencies
